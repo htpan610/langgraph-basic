@@ -22,6 +22,7 @@ llm.invoke("你好")  # 测试模型
 
 # 定义节点函数
 def chatbot(state: State):
+    print(state)
     return {"messages": [llm.invoke(state["messages"])]}
 
 
@@ -37,6 +38,7 @@ def stream_graph_updates(user_input: str):
     for event in graph.stream(
         {"messages": [{"role": "user", "content": user_input}]}
     ):
+        print(event)
         for value in event.values():
             print("Assistant:", value["messages"][-1].content)
 
