@@ -34,13 +34,7 @@ def stream_graph_updates(user_input:str):
     for event in graph.stream({"messages": [{"role": "user", "content": user_input}]}):
         for value in event.values():
             print("Assistant:",value["messages"][-1].content)
-from IPython.display import Image, display
 
-try:
-    display(Image(graph.get_graph().draw_mermaid_png()))
-except Exception:
-    # This requires some extra dependencies and is optional
-    pass
 while True:
     try:
         user_input=input("User:")
