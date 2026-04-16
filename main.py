@@ -6,6 +6,7 @@ from langgraph.graph.message import add_messages
 from langchain.chat_models import init_chat_model
 from IPython.display import Image, display
 
+from tools import tools
 # 读取 .env 环境变量
 load_dotenv()
 
@@ -17,13 +18,12 @@ class State(TypedDict):
 
 # 初始化模型
 llm = init_chat_model("deepseek-chat", model_provider="deepseek")
-llm.invoke("你好")  # 测试模型
-
+llm_with_tools = llm.bind_tools(tools)
 
 # 定义节点函数
 def chatbot(state: State):
     print(state)
-    return {"messages": [llm.invoke(state["messages"])]}
+    return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
 
 # 构建图
@@ -35,12 +35,12 @@ graph = graph_builder.compile()
 
 # 运行图
 def stream_graph_updates(user_input: str):
-    for event in graph.stream(
-        {"messages": [{"role": "user", "content": user_input}]}
-    ):
-        print(event)
+    for event in graph.stream(        {"messages": [{"role": "user", "content": user_input}]}    ): # 流式输出,走一个节点就输出
         for value in event.values():
-            print("Assistant:", value["messages"][-1].content)
+            print("==== 调试 ====")
+            print("messages:", value["messages"])
+            print("最后一条:", value["messages"][-1])
+            print("内容:", value["messages"][-1].content)
 
 # 聊天循环
 while True:

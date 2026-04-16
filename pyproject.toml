@@ -8,6 +8,7 @@ dependencies = [
     "ipython>=9.12.0",
     "langchain>=1.2.15",
     "langchain-deepseek>=1.0.1",
+    "langchain-tavily>=0.2.17",
     "langgraph>=1.1.6",
     "langsmith>=0.7.31",
     "openai>=2.31.0",
