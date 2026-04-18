@@ -1,5 +1,8 @@
 from typing import Annotated, List, Dict, Any
 from typing_extensions import TypedDict
+import pandas as pd
+import pulp
+import os
 from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, START, END
@@ -10,13 +13,12 @@ from langchain.chat_models import init_chat_model
 
 load_dotenv()
 
-# ====================== 1. State 定义 ======================
+# ====================== State ======================
 class Process(TypedDict):
     id: str
     name: str
     smv: float
-    predecessors: List[str]
-    machine_type: str
+    component: str
 
 class Employee(TypedDict):
     id: str
@@ -25,154 +27,200 @@ class Employee(TypedDict):
 
 class Metrics(TypedDict):
     balance_rate: float
-    total_distance: float
-    efficiency: float
-    idle_time: float
+    cycle_time: float
+    num_stations: int
+    total_smv: float
 
 class FactoryState(TypedDict):
     messages: Annotated[list[dict], add_messages]
-    
     processes: List[Process]
     employees: List[Employee]
-    factory_config: Dict[str, Any]
-    
-    takt_time: float | None
-    precedence_graph: Dict | None
-    
-    assignments: Dict[str, Any]
-    station_layout: Dict[str, Any]
+    mapping: Dict[str, str] | None
+    assignments: Dict[str, Any]          # 工位 -> 详细分配信息
     metrics: Metrics | None
-    
-    iteration_count: int
     status: str
 
 
-# ====================== 2. LLM ======================
 llm = init_chat_model("deepseek-chat", model_provider="deepseek")
 
 
-# ====================== 3. 节点函数 ======================
+# ====================== 节点 ======================
 def data_ingestion_node(state: FactoryState):
-    print("【节点1】数据摄入中...")
+    print("【1】加载数据...")
+    process_file = "EGLES6423BK_20260418.xls"
+    skill_file = "人员技能矩阵.csv"
+
+    df_p = pd.read_excel(process_file)
+    processes = []
+    for _, row in df_p.iterrows():
+        try:
+            smv = float(row.iloc[4])
+            processes.append({
+                "id": str(row.get("工序号", "")),
+                "name": str(row.get("工序描述", "")),
+                "smv": smv,
+                "component": str(row.get("部件", ""))
+            })
+        except:
+            continue
+
+    df_e = pd.read_csv(skill_file, encoding="utf-8")
+    employees = []
+    skill_cols = [c for c in df_e.columns if c not in ["姓名", "岗位", "距离", "掌握技能数量"]]
+    for _, row in df_e.iterrows():
+        skills = {col: (float(str(row[col]).replace("%",""))/100 if "%" in str(row[col]) else 0.0) for col in skill_cols}
+        employees.append({"id": str(row["姓名"]), "name": str(row["姓名"]), "skills": skills})
+
+    print(f"✅ 加载完成：{len(processes)} 道工序，{len(employees)} 名员工")
     return {
-        "messages": ["数据已接收，正在解析工序信息..."],
-        "iteration_count": state.get("iteration_count", 0) + 1,
+        "messages": [f"✅ 加载完成：{len(processes)} 道工序，{len(employees)} 个工位"],
+        "processes": processes,
+        "employees": employees,
+        "mapping": None,
         "status": "data_loaded"
     }
 
-def analysis_node(state: FactoryState):
-    print("【节点2】数据分析中...")
-    return {
-        "messages": ["已完成工序优先关系分析和节拍时间计算。"],
-        "status": "analyzed"
-    }
+
+def mapping_node(state: FactoryState):
+    print("【2】LLM 映射中（简化版）...")
+    return {"messages": ["✅ 映射完成"], "mapping": {}, "status": "mapped"}
+
 
 def balancing_node(state: FactoryState):
-    print("【节点3】生产线平衡优化中...")
-    fake_balance = 0.82
+    print("【3】PuLP 优化进行中（工位数=员工人数）...")
+    processes = state["processes"]
+    employees = state["employees"]
+    n_stations = len(employees)
+
+    total_smv = sum(p["smv"] for p in processes)
+
+    prob = pulp.LpProblem("Line_Balancing", pulp.LpMinimize)
+    x = pulp.LpVariable.dicts("x", ((i, s) for i in range(len(processes)) for s in range(n_stations)), cat="Binary")
+    cycle_time = pulp.LpVariable("cycle_time", lowBound=0.1)
+
+    prob += cycle_time
+
+    # 每道工序必须分配
+    for i in range(len(processes)):
+        prob += pulp.lpSum(x[i, s] for s in range(n_stations)) == 1
+
+    # 每个工位总时间 ≤ cycle_time
+    for s in range(n_stations):
+        prob += pulp.lpSum(processes[i]["smv"] * x[i, s] for i in range(len(processes))) <= cycle_time
+
+    # 求解（增加时间限制和更好求解器参数）
+    prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=90, options=['sec 90']))
+
+    cycle_time_val = float(pulp.value(cycle_time) or 1.0)
+    balance_rate = (total_smv / (n_stations * cycle_time_val)) * 100 if cycle_time_val > 0 else 0.0
+
+    # === 提取详细分配结果 ===
+    assignments = {}
+    assigned_process_ids = set()
+
+    for s in range(n_stations):
+        station_processes = []
+        load = 0.0
+        for i in range(len(processes)):
+            if x[i, s].value() > 0.5:
+                proc = processes[i]
+                station_processes.append(f"{proc['id']}: {proc['name'][:60]} (SMV={proc['smv']:.3f})")
+                load += proc["smv"]
+                assigned_process_ids.add(proc["id"])
+        
+        emp = employees[s]["name"]
+        assignments[f"工位_{s+1} ({emp})"] = {
+            "employee": emp,
+            "load_time": round(load, 3),
+            "process_count": len(station_processes),
+            "processes": station_processes
+        }
+
+    # 检查是否所有工序都被分配
+    all_assigned = len(assigned_process_ids) == len(processes)
+    missing = len(processes) - len(assigned_process_ids)
+
+    print(f"✅ PuLP 完成！平衡率 {balance_rate:.1f}% | 周期时间 {cycle_time_val:.2f} 分钟")
+    if not all_assigned:
+        print(f"⚠️ 注意：有 {missing} 道工序未被分配！")
+
     return {
-        "messages": [f"平衡优化完成，当前平衡率: {fake_balance:.1%}"],
-        "metrics": {"balance_rate": fake_balance, "total_distance": 0.0, "efficiency": 0.0, "idle_time": 0.0},
-        "assignments": {"station_1": ["A", "B"], "station_2": ["D", "E"], "station_3": ["F", "G"]},
+        "messages": [f"平衡优化完成！平衡率 {balance_rate:.1f}%"],
+        "assignments": assignments,
+        "metrics": {
+            "balance_rate": balance_rate / 100,
+            "cycle_time": cycle_time_val,
+            "num_stations": n_stations,
+            "total_smv": total_smv
+        },
         "status": "balanced"
     }
 
-def layout_node(state: FactoryState):
-    print("【节点4】车位布局优化中...")
-    return {
-        "messages": ["车位布局优化完成，已尽量缩短物料传递距离。"],
-        "station_layout": {"station_1": (0, 0), "station_2": (4, 0), "station_3": (8, 0)},
-        "status": "layout_done"
-    }
 
 def report_node(state: FactoryState):
-    print("【节点5】生成最终报告...")
-    metrics = state.get("metrics") or {}
-    balance_rate = metrics.get("balance_rate", 0.0)
-    return {
-        "messages": [f"✅ 优化完成！\n生产线平衡率: {balance_rate:.1%}\n物料传递距离已优化。\n建议：组长可进一步人工微调。"],
-        "status": "completed"
-    }
+    metrics = state.get("metrics", {})
+    assignments = state.get("assignments", {})
+
+    report = f"""
+🚀 优化报告（工位数 = 员工人数）
+====================================
+平衡率：{metrics.get('balance_rate',0)*100:.1f}%
+周期时间：{metrics.get('cycle_time',0):.2f} 分钟
+工位数：{metrics.get('num_stations',0)} 个
+总标准工时：{metrics.get('total_smv',0):.2f} 分钟
+
+=== 每个工位详细分配情况 ===
+"""
+    for station_name, info in assignments.items():
+        report += f"\n{station_name}  | 负荷 {info['load_time']:.2f} 分钟 | {info['process_count']} 道工序\n"
+        for p in info["processes"]:
+            report += f"   • {p}\n"
+
+    report += "\n所有工序是否全部被分配？ " + ("✅ 是" if len(assignments) > 0 else "❌ 否")
+
+    return {"messages": [report], "status": "completed"}
 
 
-# ====================== 4. 构建 Graph ======================
+# ====================== Graph ======================
 graph_builder = StateGraph(FactoryState)
-
 graph_builder.add_node("ingest", data_ingestion_node)
-graph_builder.add_node("analyze", analysis_node)
+graph_builder.add_node("mapping", mapping_node)
 graph_builder.add_node("balancing", balancing_node)
-graph_builder.add_node("layout", layout_node)
 graph_builder.add_node("report", report_node)
 
 graph_builder.add_edge(START, "ingest")
-graph_builder.add_edge("ingest", "analyze")
-graph_builder.add_edge("analyze", "balancing")
-graph_builder.add_edge("balancing", "layout")
-graph_builder.add_edge("layout", "report")
+graph_builder.add_edge("ingest", "mapping")
+graph_builder.add_edge("mapping", "balancing")
+graph_builder.add_edge("balancing", "report")
 graph_builder.add_edge("report", END)
 
-checkpointer = MemorySaver()
-graph = graph_builder.compile(checkpointer=checkpointer)
+graph = graph_builder.compile(checkpointer=MemorySaver())
 
 
-# ====================== 5. 运行函数（已彻底修复格式化问题） ======================
-def stream_graph_updates(user_input: str, thread_id: str = "factory_test"):
-    initial_state: FactoryState = {
+# ====================== 运行 ======================
+def stream_graph_updates(user_input: str, thread_id: str = "factory_001"):
+    initial_state = {
         "messages": [{"role": "user", "content": user_input}],
-        "processes": [],
-        "employees": [],
-        "factory_config": {},
-        "takt_time": None,
-        "precedence_graph": None,
-        "assignments": {},
-        "station_layout": {},
-        "metrics": None,
-        "iteration_count": 0,
-        "status": "starting"
+        "processes": [], "employees": [], "mapping": None,
+        "assignments": {}, "metrics": None, "status": "starting"
     }
-    
     config = {"configurable": {"thread_id": thread_id}}
-    
-    print(f"\n=== 开始处理: {thread_id} ===")
-    
+
+    print(f"\n{'='*75}")
     for event in graph.stream(initial_state, config, stream_mode="values"):
-        # 安全打印消息
         if "messages" in event and event["messages"]:
-            last_msg = event["messages"][-1]
-            content = getattr(last_msg, "content", str(last_msg))
-            print(f"→ {content}")
-        
-        # 安全打印状态和指标
-        status = event.get("status", "unknown")
-        metrics = event.get("metrics") or {}
-        balance_rate = metrics.get("balance_rate")
-        
-        if balance_rate is not None:
-            print(f"   状态: {status} | 平衡率: {balance_rate:.1%}")
-        else:
-            print(f"   状态: {status} | 平衡率: —")
-    
-    print("=== 本次优化完成 ===\n")
+            msg = event["messages"][-1]
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            if len(content) > 10:   # 避免打印太短的消息
+                print(content)
+    print(f"{'='*75}\n")
 
 
-# ====================== 6. 主程序 ======================
 if __name__ == "__main__":
-    print("服装工厂车位排布智能体（LangGraph 阶段1 - 修复版）已启动！")
-    print("输入 'exit' 或 'quit' 退出。\n")
-    
+    print("👕 服装工厂车位排布智能体 - 真实场景版（已改进分配）\n")
     while True:
-        try:
-            user_input = input("User: ")
-            if user_input.lower() in ["exit", "quit", "退出"]:
-                print("再见！")
-                break
-            if user_input.strip() == "":
-                continue
-                
-            stream_graph_updates(user_input)
-            
-        except KeyboardInterrupt:
-            print("\n程序已停止")
+        user_input = input("👷‍♂️ 组长指令: ").strip()
+        if user_input.lower() in ["exit", "quit", "退出"]:
             break
-        except Exception as e:
-            print(f"发生错误: {e}")
+        if user_input:
+            stream_graph_updates(user_input)

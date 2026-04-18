@@ -12,5 +12,8 @@ dependencies = [
     "langgraph>=1.1.6",
     "langsmith>=0.7.31",
     "openai>=2.31.0",
+    "pandas>=3.0.2",
+    "pulp>=3.3.0",
     "python-dotenv>=1.2.2",
+    "xlrd>=2.0.2",
 ]
