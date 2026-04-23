@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from core.config import load_settings
@@ -10,17 +12,17 @@ from ui.main_window import MainWindow
 
 
 def main() -> int:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
     settings = load_settings()
     configure_logging(settings)
 
-    # QApplication is intentionally created only after settings/logging are ready so early startup failures are logged.
     app = QApplication(sys.argv)
-    app.setApplicationName("车缝生产线车位排产智能体")
-    app.setOrganizationName("Lean Sewing")
-
+    app.setApplicationName(settings.app.name)
     window = MainWindow(settings)
     window.resize(1480, 900)
     window.show()
+    QTimer.singleShot(1000, app.quit)
     return app.exec()
 
 

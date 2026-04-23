@@ -1,0 +1,26 @@
+[app]
+name = "车缝生产线车位排产智能体"
+data_dir = "runtime"
+log_dir = "logs"
+
+[llm]
+provider = "deepseek"
+base_url = "https://api.deepseek.com"
+mapping_model = "deepseek-chat"
+reasoning_model = "deepseek-reasoner"
+timeout_seconds = 60
+confidence_threshold = 0.80
+
+[balancing]
+default_missing_efficiency = 0.30
+solver_time_limit_seconds = 8
+minimum_balance_rate = 0.85
+
+[layout]
+station_width = 150
+station_height = 88
+grid_gap = 42
+default_flow_volume = 1.0
+
+[templates]
+combination_component = "组合"
